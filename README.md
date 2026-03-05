@@ -38,12 +38,49 @@ The script compares the local `RepoDigest` of each container's image against the
 | `docker_image_check.sh` | The monitoring script called by Zabbix |
 | `docker_updates.conf` | Zabbix Agent 2 `UserParameter` definitions |
 | `docker_image_updates_template.yaml` | Zabbix 7.4 template (import-ready) |
+| `install.sh` | Automated installer for Debian/Ubuntu systems |
 
 ---
 
 ## Installation
 
-### 1 — Install the script
+### Automated (recommended)
+
+Run the installer as root on the target host. It handles all dependencies, file placement, permissions, and restarts Zabbix Agent 2 automatically.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pthoelken/docker-zabbix-image-monitoring/main/install.sh | sudo bash
+```
+
+Or clone first and run locally:
+
+```bash
+git clone https://github.com/pthoelken/docker-zabbix-image-monitoring.git
+cd docker-zabbix-image-monitoring
+sudo bash install.sh
+```
+
+The installer will:
+1. Verify Docker and Zabbix Agent 2 are present
+2. Install missing dependencies (`git`, `skopeo`, `jq`) via `apt`
+3. Deploy `docker_image_check.sh` to `/etc/zabbix/scripts/` with correct permissions
+4. Deploy `docker_updates.conf` to `/etc/zabbix/zabbix_agent2.d/`
+5. Add the `zabbix` user to the `docker` group
+6. Restart `zabbix-agent2.service`
+
+After the installer completes, continue with [Import the Zabbix template](#4--import-the-zabbix-template) below.
+
+---
+
+### Manual
+
+#### 1 — Install dependencies
+
+```bash
+apt install -y skopeo jq
+```
+
+#### 2 — Install the script
 
 ```bash
 mkdir -p /etc/zabbix/scripts
@@ -52,7 +89,7 @@ chmod 755 /etc/zabbix/scripts/docker_image_check.sh
 chown root:zabbix /etc/zabbix/scripts/docker_image_check.sh
 ```
 
-### 2 — Grant Docker access to the zabbix user
+#### 3 — Grant Docker access to the zabbix user
 
 **Option A — simple** (zabbix gets full Docker socket access):
 
@@ -74,13 +111,13 @@ chmod 440 /etc/sudoers.d/zabbix-docker
 
 > If you use Option B, prefix the `docker` calls in `docker_image_check.sh` with `sudo`.
 
-### 3 — Install the agent configuration
+#### 4 — Install the agent configuration
 
 ```bash
 cp docker_updates.conf /etc/zabbix/zabbix_agent2.d/
 ```
 
-### 4 — Increase the agent timeout
+#### 5 — Increase the agent timeout
 
 Edit `/etc/zabbix/zabbix_agent2.conf`:
 
@@ -90,11 +127,26 @@ Timeout=30
 
 `skopeo` queries a remote registry and can take several seconds, especially under load or for slow registries.
 
-### 5 — Restart Zabbix Agent 2
+#### 6 — Restart Zabbix Agent 2
 
 ```bash
 systemctl restart zabbix-agent2
 ```
+
+---
+
+### 4 — Import the Zabbix template
+
+1. Go to **Data collection → Templates → Import**
+2. Upload `docker_image_updates_template.yaml`
+3. Click **Import**
+
+### 5 — Assign the template to your host
+
+1. Go to **Data collection → Hosts**
+2. Open your Docker host
+3. Under **Templates**, add **Docker Image Update Monitor**
+4. Save
 
 ### 6 — Test the script manually
 
@@ -107,19 +159,6 @@ sudo -u zabbix /etc/zabbix/scripts/docker_image_check.sh check_update <container
 ```
 
 Expected output for `check_update`: `0` (up to date) or `1` (update available).
-
-### 7 — Import the Zabbix template
-
-1. Go to **Data collection → Templates → Import**
-2. Upload `docker_image_updates_template.yaml`
-3. Click **Import**
-
-### 8 — Assign the template to your host
-
-1. Go to **Data collection → Hosts**
-2. Open your Docker host
-3. Under **Templates**, add **Docker Image Update Monitor**
-4. Save
 
 ---
 
