@@ -1,0 +1,181 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: ad14a668f36e415abe025de19c06949d
+      name: Templates/Docker
+  templates:
+    - uuid: 403bd28dc8994060a0cfb4917fc87ca8
+      template: 'Docker Image Update Monitor'
+      name: 'Docker Image Update Monitor'
+      description: |
+        Monitors all running Docker containers and detects when a newer image is
+        available in the registry. A trigger fires per container as soon as the
+        remote digest differs from the locally stored one.
+
+        Requirements on every monitored host:
+          - Docker daemon running
+          - skopeo installed (apt install skopeo / yum install skopeo)
+          - jq installed (apt install jq / yum install jq)
+          - /etc/zabbix/scripts/docker_image_check.sh  (chmod 755)
+          - /etc/zabbix/zabbix_agentd.d/docker_updates.conf
+          - Zabbix agent Timeout >= 30 in agent config
+          - zabbix user in group docker  OR  sudo rules for docker commands
+
+        Macros you can override per host:
+          {$DOCKER_UPDATE_INTERVAL}    - how often to poll for updates (default 1h)
+          {$DOCKER_DISCOVERY_INTERVAL} - how often to re-discover containers (default 5m)
+
+        Item return codes for docker.image.update:
+          0 = Up to date
+          1 = Update available
+          2 = Cannot check (locally built image or registry unreachable)
+          3 = Container not found / script error
+      groups:
+        - name: Templates/Docker
+      items:
+        - uuid: dcb408c694d84481a0e678fcf50c14c2
+          name: 'Docker Daemon Status'
+          key: docker.daemon.status
+          delay: 2m
+          description: |
+            1 = Docker daemon is running and responsive
+            0 = Docker daemon is down or unreachable by the zabbix user
+          valuemap:
+            name: 'Docker Daemon Status'
+          tags:
+            - tag: application
+              value: 'Docker Image Update Monitor'
+            - tag: component
+              value: docker
+          triggers:
+            - uuid: 006ad61d3f3948b383fabe87981c96e5
+              expression: 'last(/Docker Image Update Monitor/docker.daemon.status)=0'
+              name: 'Docker daemon is not running on {HOST.NAME}'
+              priority: HIGH
+              description: 'The Docker daemon on {HOST.NAME} is not responding. No container monitoring is possible until it recovers.'
+              tags:
+                - tag: scope
+                  value: availability
+      discovery_rules:
+        - uuid: ff73ec7376064acca5aedff949c8f1ca
+          name: 'Docker Container Discovery'
+          key: docker.containers.discover
+          delay: '{$DOCKER_DISCOVERY_INTERVAL}'
+          lifetime: 1d
+          description: 'Runs docker ps and returns all running containers as LLD macros: {#CONTAINER_ID}, {#CONTAINER_NAME}, {#CONTAINER_IMAGE}'
+          item_prototypes:
+            - uuid: b24a4de25da44efc81b63d2d91ffde88
+              name: 'Container [{#CONTAINER_NAME}]: Local Image Digest'
+              key: 'docker.image.digest[{#CONTAINER_NAME}]'
+              delay: '{$DOCKER_UPDATE_INTERVAL}'
+              value_type: TEXT
+              description: 'The sha256 digest of the locally stored image. Changes after a docker pull / image update.'
+              tags:
+                - tag: application
+                  value: 'Docker Image Update Monitor'
+                - tag: component
+                  value: docker
+                - tag: container
+                  value: '{#CONTAINER_NAME}'
+            - uuid: 8101763e916c4212b3fef2096805d2da
+              name: 'Container [{#CONTAINER_NAME}]: Image Reference'
+              key: 'docker.image.name[{#CONTAINER_NAME}]'
+              delay: '{$DOCKER_DISCOVERY_INTERVAL}'
+              value_type: TEXT
+              description: 'The image reference string the container was started with, e.g. nginx:latest or registry.example.com/app:1.2.3'
+              tags:
+                - tag: application
+                  value: 'Docker Image Update Monitor'
+                - tag: component
+                  value: docker
+                - tag: container
+                  value: '{#CONTAINER_NAME}'
+            - uuid: c4857bcc6c7f4a138b317d9b948ac163
+              name: 'Container [{#CONTAINER_NAME}]: Update Status'
+              key: 'docker.image.update[{#CONTAINER_NAME}]'
+              delay: '{$DOCKER_UPDATE_INTERVAL}'
+              description: |
+                Compares the local image digest with the current registry digest.
+                0 = Up to date
+                1 = Update available
+                2 = Cannot check (locally built or registry unreachable)
+                3 = Container not found / script error
+              valuemap:
+                name: 'Docker Image Update Status'
+              tags:
+                - tag: application
+                  value: 'Docker Image Update Monitor'
+                - tag: component
+                  value: docker
+                - tag: container
+                  value: '{#CONTAINER_NAME}'
+              trigger_prototypes:
+                - uuid: 7869421aacb946258df6c343d012a804
+                  expression: 'last(/Docker Image Update Monitor/docker.image.update[{#CONTAINER_NAME}])=1'
+                  name: 'Container [{#CONTAINER_NAME}]: Update available on {HOST.NAME}'
+                  priority: WARNING
+                  description: |
+                    A newer version of the image for container {#CONTAINER_NAME} is
+                    available in the registry.
+
+                    Current image:  {#CONTAINER_IMAGE}
+                    Host:           {HOST.NAME}
+
+                    Action: pull the new image and recreate the container, then
+                    close this trigger manually or wait for the next check cycle.
+                  manual_close: 'YES'
+                  tags:
+                    - tag: container
+                      value: '{#CONTAINER_NAME}'
+                    - tag: scope
+                      value: update
+                - uuid: 1e1d780ef6c94c1dbd04022ac89bcdce
+                  expression: 'last(/Docker Image Update Monitor/docker.image.update[{#CONTAINER_NAME}])>=2'
+                  name: 'Container [{#CONTAINER_NAME}]: Update check failed on {HOST.NAME}'
+                  priority: INFO
+                  description: |
+                    The update check for container {#CONTAINER_NAME} returned an
+                    unexpected result (2 = cannot check, 3 = container not found).
+
+                    Possible reasons:
+                      - The image was built locally and has no RepoDigest
+                      - The registry requires authentication (configure skopeo auth)
+                      - Network connectivity issues to the registry
+                      - The container stopped between discovery and the check
+                  manual_close: 'YES'
+                  tags:
+                    - tag: scope
+                      value: notice
+      tags:
+        - tag: application
+          value: imageupdate
+        - tag: class
+          value: software
+        - tag: target
+          value: docker
+      macros:
+        - macro: '{$DOCKER_DISCOVERY_INTERVAL}'
+          value: 5m
+          description: 'How often to run docker ps and discover running containers.'
+        - macro: '{$DOCKER_UPDATE_INTERVAL}'
+          value: 1h
+          description: 'How often to query the registry for image updates. Increase this for hosts with many containers or slow registries.'
+      valuemaps:
+        - uuid: 073d38292ec04dff9c3d0d48959ea92e
+          name: 'Docker Daemon Status'
+          mappings:
+            - value: '0'
+              newvalue: 'Not running'
+            - value: '1'
+              newvalue: Running
+        - uuid: 2cd59fd9d1e0454c8bc35d4636510f18
+          name: 'Docker Image Update Status'
+          mappings:
+            - value: '0'
+              newvalue: 'Up to date'
+            - value: '1'
+              newvalue: 'Update available'
+            - value: '2'
+              newvalue: 'Cannot check'
+            - value: '3'
+              newvalue: Error
